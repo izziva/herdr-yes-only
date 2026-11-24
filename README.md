@@ -8,17 +8,38 @@ With the optional [`LiquidAI/d1-2B`](https://huggingface.co/LiquidAI/d1-2B) Syst
 
 Inspired by [`RenKoya1/herdr-approve-all`](https://github.com/RenKoya1/herdr-approve-all), but replaces blanket approval with a fail-closed pipeline.
 
-## Install
+## Quick start
 
 ```bash
 herdr plugin install izziva/herdr-yes-only
+herdr plugin enable izziva.herdr-yes-only
+herdr plugin list
 ```
 
-## Modes
+Run one approval sweep in the default strict mode:
 
-### `strict` — default
+```bash
+herdr plugin action invoke izziva.herdr-yes-only.approve-blocked \
+  --plugin izziva.herdr-yes-only
+```
 
-The plugin reads the visible screen and sends `Enter` only when:
+Enable automatic approval for qualifying prompts:
+
+```bash
+herdr plugin action invoke izziva.herdr-yes-only.auto-on \
+  --plugin izziva.herdr-yes-only
+```
+
+Disable it again:
+
+```bash
+herdr plugin action invoke izziva.herdr-yes-only.auto-off \
+  --plugin izziva.herdr-yes-only
+```
+
+## Strict mode
+
+Strict mode is the default. It sends `Enter` only when:
 
 1. Exactly two options are present.
 2. They are exactly `Yes` and `No`, case-insensitive.
@@ -33,15 +54,33 @@ It ignores:
 - Multi-select menus
 - Ambiguous prompts
 
-### `system-one` — optional
+## System One mode
 
-Enable with:
+First install the Python dependencies and download the local decision model:
 
 ```bash
-export HERDR_YES_ONLY_MODE=system-one
+python3 -m pip install 'transformers>=5.19' torch torchvision pillow
+python3 - <<'PY'
+from transformers import AutoModel
+AutoModel.from_pretrained('LiquidAI/d1-2B', trust_remote_code=True)
+PY
 ```
 
-This mode first identifies a candidate binary prompt from affirmative/negative families:
+Enable the triple-gate model check:
+
+```bash
+herdr plugin action invoke izziva.herdr-yes-only.system-one-on \
+  --plugin izziva.herdr-yes-only
+```
+
+Disable it and return to strict mode:
+
+```bash
+herdr plugin action invoke izziva.herdr-yes-only.system-one-off \
+  --plugin izziva.herdr-yes-only
+```
+
+System One considers binary prompts from related affirmative/negative families:
 
 | Affirmative | Negative |
 |---|---|
@@ -55,7 +94,7 @@ This mode first identifies a candidate binary prompt from affirmative/negative f
 | `Run`, `Execute` | `Don't run`, `Do not run` |
 | `Trust`, `Enable` | `Disable` |
 
-The candidate must still contain exactly two options: one affirmative and one negative. The plugin then asks `d1-2B` three `noul` questions in **one** `system_one` request:
+A candidate must contain exactly two options: one affirmative and one negative. The plugin then asks `d1-2B` three `noul` questions in **one** `system_one` request:
 
 | Gate | Question | Default threshold |
 |---|---|---:|
@@ -69,7 +108,13 @@ If the model is unavailable, times out, errors, or is uncertain, the plugin fail
 
 ## Configuration
 
-Create `$HERDR_PLUGIN_CONFIG_DIR/config.env` or export:
+Find the plugin configuration directory:
+
+```bash
+herdr plugin config-dir izziva.herdr-yes-only
+```
+
+Create a `config.env` file there, or export the variables in your shell:
 
 ```bash
 HERDR_YES_ONLY_MODE=strict
@@ -82,19 +127,33 @@ HERDR_YES_ONLY_BLOCK_RISKY=1
 HERDR_YES_ONLY_DEBUG=0
 ```
 
-## Model setup
-
-Pre-download the model before starting Herdr:
+To use System One persistently, set:
 
 ```bash
-python3 -m pip install 'transformers>=5.19' torch torchvision pillow
-python3 - <<'PY'
-from transformers import AutoModel
-AutoModel.from_pretrained('LiquidAI/d1-2B', trust_remote_code=True)
-PY
+HERDR_YES_ONLY_MODE=system-one
 ```
 
-The bundled helper loads the model locally through Transformers, preferring CUDA, then Apple MPS, then CPU.
+## Verify and troubleshoot
+
+List recent plugin logs:
+
+```bash
+herdr plugin log list --plugin izziva.herdr-yes-only --limit 20
+```
+
+Enable diagnostic output for the model gate:
+
+```bash
+HERDR_YES_ONLY_DEBUG=1
+```
+
+Common checks:
+
+- Run `herdr plugin list` to ensure the plugin is installed and enabled.
+- Run `herdr plugin action list --plugin izziva.herdr-yes-only` to confirm the actions are registered.
+- If System One does nothing, verify that `LiquidAI/d1-2B` has been downloaded and that Python can import `torch` and `transformers`.
+- Set `HERDR_YES_ONLY_DEBUG=1` to inspect the context, safety, and response probabilities.
+- Keep `HERDR_YES_ONLY_MODE=strict` if you want to approve only exact `Yes` / `No` prompts.
 
 ## Actions
 
