@@ -1,0 +1,40 @@
+id = "izziva.herdr-yes-only"
+name = "Yes Only"
+version = "0.2.1"
+min_herdr_version = "0.7.4"
+description = "Strict mode approves only exact Yes/No prompts. Optional LiquidAI d1-2B triple gate extends decisions to safe binary approval-family prompts."
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "approve-blocked"
+title = "Approve qualifying binary prompts"
+contexts = ["workspace"]
+command = ["bash", "scripts/approve-blocked.sh"]
+
+[[actions]]
+id = "system-one-on"
+title = "System One triple gate: ON"
+contexts = ["workspace"]
+command = ["bash", "scripts/auto-toggle.sh", "system-one-on"]
+
+[[actions]]
+id = "system-one-off"
+title = "System One triple gate: OFF"
+contexts = ["workspace"]
+command = ["bash", "scripts/auto-toggle.sh", "system-one-off"]
+
+[[actions]]
+id = "auto-on"
+title = "Auto-approve: ON"
+contexts = ["workspace"]
+command = ["bash", "scripts/auto-toggle.sh", "on"]
+
+[[actions]]
+id = "auto-off"
+title = "Auto-approve: OFF"
+contexts = ["workspace"]
+command = ["bash", "scripts/auto-toggle.sh", "off"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["bash", "scripts/on-status-changed.sh"]
