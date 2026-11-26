@@ -7,7 +7,7 @@ HERDR="${HERDR_BIN_PATH:-herdr}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 YES_ONLY_MODE="${HERDR_YES_ONLY_MODE:-strict}"
-D1_MODEL="${HERDR_YES_ONLY_D1_MODEL:-LiquidAI/d1-2B}"
+D1_MODEL="${HERDR_YES_ONLY_D1_MODEL:-LiquidAI/d1-2B-MLX-4bit}"
 D1_MIN_CONTEXT="${HERDR_YES_ONLY_D1_MIN_CONTEXT_CONFIDENCE:-0.80}"
 D1_MIN_SAFETY="${HERDR_YES_ONLY_D1_MIN_SAFETY_CONFIDENCE:-0.90}"
 D1_MIN_RESPONSE="${HERDR_YES_ONLY_D1_MIN_RESPONSE_CONFIDENCE:-0.90}"
@@ -16,8 +16,11 @@ BLOCK_RISKY="${HERDR_YES_ONLY_BLOCK_RISKY:-1}"
 DEBUG="${HERDR_YES_ONLY_DEBUG:-0}"
 
 APPROVE_MAX_SENDS="${APPROVE_MAX_SENDS:-5}"
+APPROVE_DELAY_SEC="${APPROVE_DELAY_SEC:-2}"
 APPROVE_LEAVE_TIMEOUT_MS="${APPROVE_LEAVE_TIMEOUT_MS:-1200}"
 APPROVE_SETTLE_SEC="${APPROVE_SETTLE_SEC:-0.15}"
+APPROVE_RECHECK_TRIES="${APPROVE_RECHECK_TRIES:-5}"
+APPROVE_RECHECK_SEC="${APPROVE_RECHECK_SEC:-0.3}"
 
 file_mtime() {
   stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || date +%s
@@ -67,6 +70,35 @@ normalize_screen() {
   printf '%s\n' "$1" | sed 's/\x1b\[[0-9;]*[A-Za-z]//g; s/\r$//'
 }
 
+# The menu being answered: the run of non-blank lines around the last cursor
+# line (or the last run, without a cursor), so numbered lists in the agent's
+# output above the prompt are not counted as options. Numbered options that
+# wrap are joined back onto one line.
+menu_block() {
+  printf '%s\n' "$1" | awk '
+    { line[NR] = $0 }
+    /^[[:space:]]*❯/ { cur = NR }
+    END {
+      if (!cur) { cur = NR; while (cur > 0 && line[cur] ~ /^[[:space:]]*$/) cur-- }
+      if (!cur) exit
+      s = cur; while (s > 1 && line[s - 1] !~ /^[[:space:]]*$/) s--
+      e = cur; while (e < NR && line[e + 1] !~ /^[[:space:]]*$/) e++
+      for (i = s; i <= e; i++) {
+        if (line[i] ~ /^[[:space:]]*(❯[[:space:]]*)?[0-9]+\.[[:space:]]/) {
+          if (buf != "") print buf
+          buf = line[i]
+        } else if (buf != "" && line[i] ~ /^    +[^[:space:]]/) {
+          t = line[i]; sub(/^[[:space:]]+/, "", t); buf = buf " " t
+        } else {
+          if (buf != "") print buf
+          buf = ""
+          print line[i]
+        }
+      }
+      if (buf != "") print buf
+    }'
+}
+
 risky_command_present() {
   local screen="$1"
   [ "$BLOCK_RISKY" = "1" ] || return 1
@@ -77,25 +109,32 @@ risky_command_present() {
   return 1
 }
 
-# Strict mode: exact Yes and No only.
+# Strict mode: exact Yes and No. A third "Yes, and don't ask again / for this
+# session" option is tolerated, but Enter must select the one-time Yes.
 strict_yes_no_prompt() {
-  local screen="$1" normalized
-  local yes_count no_count cursor_yes default_yes numbered_options
+  local screen="$1" normalized menu
+  local yes_count yes_persistent_count no_count cursor_yes default_yes numbered_options
 
   normalized=$(normalize_screen "$screen")
   risky_command_present "$normalized" && return 1
+  menu=$(menu_block "$normalized")
 
-  numbered_options=$(printf '%s\n' "$normalized" | grep -cE '^[[:space:]]*(❯[[:space:]]*)?[0-9]+\.[[:space:]]' || true)
-  [ "$numbered_options" -le 2 ] || return 1
-
-  yes_count=$(printf '%s\n' "$normalized" | grep -icE '^[[:space:]]*(❯[[:space:]]*)?yes[[:space:]]*$' || true)
-  no_count=$(printf '%s\n' "$normalized" | grep -icE '^[[:space:]]*(❯[[:space:]]*)?no[[:space:]]*$' || true)
+  yes_count=$(printf '%s\n' "$menu" | grep -icE '^[[:space:]]*(❯[[:space:]]*)?([0-9]+\.[[:space:]]*)?yes[[:space:]]*$' || true)
+  yes_persistent_count=$(printf '%s\n' "$menu" | grep -icE \
+    '^[[:space:]]*(❯[[:space:]]*)?([0-9]+\.[[:space:]]*)?yes,[[:space:]].*(don.t ask again|this session|always)' || true)
+  no_count=$(printf '%s\n' "$menu" | grep -icE '^[[:space:]]*(❯[[:space:]]*)?([0-9]+\.[[:space:]]*)?no(,[[:space:]].*)?[[:space:]]*$' || true)
 
   [ "$yes_count" -eq 1 ] || return 1
+  [ "$yes_persistent_count" -le 1 ] || return 1
   [ "$no_count" -eq 1 ] || return 1
 
-  cursor_yes=$(printf '%s\n' "$normalized" | grep -icE '^[[:space:]]*❯[[:space:]]*yes[[:space:]]*$' || true)
-  default_yes=$(printf '%s\n' "$normalized" | grep -icE '(\(Y/n\)|\[Y/n\]|press enter to confirm yes|enter to confirm yes|default: yes)' || true)
+  numbered_options=$(printf '%s\n' "$menu" | grep -cE '^[[:space:]]*(❯[[:space:]]*)?[0-9]+\.[[:space:]]' || true)
+  [ "$numbered_options" -le $((2 + yes_persistent_count)) ] || return 1
+
+  cursor_yes=$(printf '%s\n' "$menu" | grep -icE '^[[:space:]]*❯[[:space:]]*([0-9]+\.[[:space:]]*)?yes[[:space:]]*$' || true)
+  [ "$yes_persistent_count" -eq 0 ] || [ "$cursor_yes" -eq 1 ] || return 1
+
+  default_yes=$(printf '%s\n' "$menu" | grep -icE '(\(Y/n\)|\[Y/n\]|press enter to confirm yes|enter to confirm yes|default: yes)' || true)
 
   [ "$cursor_yes" -eq 1 ] || [ "$default_yes" -ge 1 ] || return 1
   return 0
@@ -104,28 +143,29 @@ strict_yes_no_prompt() {
 # System One candidate: exactly one affirmative and one negative binary option.
 # This does not authorize an action by itself; d1-2B must pass all three gates.
 system_one_binary_candidate() {
-  local screen="$1" normalized
+  local screen="$1" normalized menu
   local affirmative_count negative_count cursor_affirmative default_affirmative numbered_options
 
   normalized=$(normalize_screen "$screen")
   risky_command_present "$normalized" && return 1
+  menu=$(menu_block "$normalized")
 
-  numbered_options=$(printf '%s\n' "$normalized" | grep -cE '^[[:space:]]*(❯[[:space:]]*)?[0-9]+\.[[:space:]]' || true)
+  numbered_options=$(printf '%s\n' "$menu" | grep -cE '^[[:space:]]*(❯[[:space:]]*)?[0-9]+\.[[:space:]]' || true)
   [ "$numbered_options" -le 2 ] || return 1
 
-  affirmative_count=$(printf '%s\n' "$normalized" | grep -icE \
-    '^[[:space:]]*(❯[[:space:]]*)?(yes([[:space:]]*,[[:space:]]*(always|allow|continue|proceed))?|approve|allow|confirm|proceed|continue|accept|install|run|execute|trust|enable)[[:space:]]*$' || true)
+  affirmative_count=$(printf '%s\n' "$menu" | grep -icE \
+    '^[[:space:]]*(❯[[:space:]]*)?([0-9]+\.[[:space:]]*)?(yes([[:space:]]*,[[:space:]]*(always|allow|continue|proceed))?|approve|allow|confirm|proceed|continue|accept|install|run|execute|trust|enable)[[:space:]]*$' || true)
 
-  negative_count=$(printf '%s\n' "$normalized" | grep -icE \
-    '^[[:space:]]*(❯[[:space:]]*)?(no|deny|reject|cancel|abort|skip|decline|disable|don.t[[:space:]]+run|do[[:space:]]+not[[:space:]]+run)[[:space:]]*$' || true)
+  negative_count=$(printf '%s\n' "$menu" | grep -icE \
+    '^[[:space:]]*(❯[[:space:]]*)?([0-9]+\.[[:space:]]*)?(no|deny|reject|cancel|abort|skip|decline|disable|don.t[[:space:]]+run|do[[:space:]]+not[[:space:]]+run)[[:space:]]*$' || true)
 
   [ "$affirmative_count" -eq 1 ] || return 1
   [ "$negative_count" -eq 1 ] || return 1
 
-  cursor_affirmative=$(printf '%s\n' "$normalized" | grep -icE \
-    '^[[:space:]]*❯[[:space:]]*(yes([[:space:]]*,[[:space:]]*(always|allow|continue|proceed))?|approve|allow|confirm|proceed|continue|accept|install|run|execute|trust|enable)[[:space:]]*$' || true)
+  cursor_affirmative=$(printf '%s\n' "$menu" | grep -icE \
+    '^[[:space:]]*❯[[:space:]]*([0-9]+\.[[:space:]]*)?(yes([[:space:]]*,[[:space:]]*(always|allow|continue|proceed))?|approve|allow|confirm|proceed|continue|accept|install|run|execute|trust|enable)[[:space:]]*$' || true)
 
-  default_affirmative=$(printf '%s\n' "$normalized" | grep -icE \
+  default_affirmative=$(printf '%s\n' "$menu" | grep -icE \
     '(\(Y/n\)|\[Y/n\]|press enter to confirm yes|enter to confirm yes|default: yes|default: approve|default: allow|default: confirm|default: proceed)' || true)
 
   [ "$cursor_affirmative" -eq 1 ] || [ "$default_affirmative" -ge 1 ] || return 1
@@ -135,7 +175,7 @@ system_one_binary_candidate() {
 system_one_gate() {
   local screen="$1" result
 
-  result=$(printf '%s' "$screen" | python3 "$SCRIPT_DIR/system_one.py" \
+  result=$(printf '%s' "$screen" | uv run --quiet --script "$SCRIPT_DIR/system_one.py" \
     --model "$D1_MODEL" \
     --min-context "$D1_MIN_CONTEXT" \
     --min-safety "$D1_MIN_SAFETY" \
@@ -169,10 +209,25 @@ prompt_allowed() {
   esac
 }
 
+# After an Enter, chained requests can reach Herdr as one: the pane goes back to
+# blocked without a new status event. Watch the pane for a short window.
+still_needs_attention() {
+  local pane="$1" i=0
+
+  while [ "$i" -lt "$APPROVE_RECHECK_TRIES" ]; do
+    [ "$(agent_status "$pane")" = "blocked" ] && return 0
+    sleep "$APPROVE_RECHECK_SEC"
+    i=$((i + 1))
+  done
+  return 1
+}
+
 approve_pane() {
   local pane="$1" sent=0
 
   while [ "$sent" -lt "$APPROVE_MAX_SENDS" ]; do
+    [ "$(agent_status "$pane")" = "blocked" ] || break
+    sleep "$APPROVE_DELAY_SEC"
     [ "$(agent_status "$pane")" = "blocked" ] || break
     prompt_allowed "$pane" || break
 
@@ -182,6 +237,8 @@ approve_pane() {
     "$HERDR" agent wait "$pane" --until idle --until working --until done \
       --timeout "$APPROVE_LEAVE_TIMEOUT_MS" >/dev/null 2>&1 || true
     sleep "$APPROVE_SETTLE_SEC"
+
+    still_needs_attention "$pane" || break
   done
 
   if [ "$sent" -eq 0 ]; then
